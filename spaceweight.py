@@ -21,6 +21,8 @@ from math import sin, cos
 from mpl_toolkits.basemap import Basemap
 from obspy.imaging.beachball import Beach
 
+import operator
+
 
 class Station(object):
 
@@ -85,6 +87,7 @@ class WeightBase(object):
         for value in od:
             sta_tag.append(value)
             sta_loc.append(od[value])
+            #print(value, od[value])
         sta_loc = np.array(sta_loc)
         self._find_duplicate(sta_loc)
 
@@ -95,6 +98,7 @@ class WeightBase(object):
             else:
                 nw_dict[station.network] = 1
         nw_dict = collections.OrderedDict(sorted(nw_dict.items()))
+
         return sta_tag, sta_loc, nw_dict
 
     @staticmethod
@@ -141,12 +145,25 @@ class WeightBase(object):
             plt.savefig(figname)
             plt.close(fig)
 
-    def write_weight(self, filename="weight.txt"):
+    def write_weight(self, filename="weight.txt", order="station_tag"):
+        order = order.lower()
+        weight_dict = dict()
+        if order not in ["station_tag", "weight"]:
+            raise ValueError("Order must be 'station_tag' or 'weight'")
+        for tag, weight in zip(self.station_tag, self.weight):
+           weight_dict[tag] = weight
+        if order == "station_tag":
+            _sorted = sorted(weight_dict.items(), key=operator.itemgetter(0))
+        elif order == "weight":
+            _sorted = sorted(weight_dict.items(), key=operator.itemgetter(1))
+        else:
+            raise NotImplementedError
+
         with open(filename, 'w') as fh:
-            for tag, weight in zip(self.station_tag, self.weight):
+            for tag, weight in _sorted:
                 fh.write("%-10s %15.5e\n" % (tag, weight))
 
-    def plot_global_map(self, outputdir=None):
+    def plot_global_map(self, outputfile=None):
         """
         Plot global map of event and stations
         """
@@ -155,7 +172,7 @@ class WeightBase(object):
         ax = plt.gca()
         plt.title("Station and Event distribution")
 
-        m = Basemap(projection='cyl', lon_0=0.0, lat_0=0.0,
+        m = Basemap(projection='moll', lon_0=0.0, lat_0=0.0,
                     resolution='c')
         m.drawcoastlines()
         m.fillcontinents()
@@ -163,16 +180,23 @@ class WeightBase(object):
         m.drawmeridians(np.arange(0., 420., 60.))
         m.drawmapboundary()
 
+        cm = plt.cm.get_cmap('RdYlBu')
         x, y = m(self.station_loc[:, 1], self.station_loc[:, 0])
-        m.scatter(x, y, 30, color="b", marker="^", edgecolor="k",
-                  linewidth='0.3', zorder=3)
+        m.scatter(x, y, 30, color=self.weight, marker="^", edgecolor="k",
+                  linewidth='0.3', zorder=3, cmap=cm)
+        plt.colorbar(shrink=0.8)
 
         cmt_lat = self.event.latitude
         cmt_lon = self.event.longitude
         src_x, src_y = m(cmt_lon, cmt_lat)
-        m.scatter(src_x, src_y, 50, color="r", marker=".", edgecolor="k",
+        m.scatter(src_x, src_y, 60, color="g", marker="o", edgecolor="k",
                   linewidth='0.3', zorder=3)
-        plt.show()
+
+        if outputfile is None:
+            plt.show()
+        else:
+            plt.savefig(outputfile)
+            plt.close(fig)
 
 
 class ExpWeight(WeightBase):
@@ -268,14 +292,16 @@ class ExpWeight(WeightBase):
         for _i in range(self.nstations):
             #comb_value = self.azi_weight[_i] * self.dist_weight[_i]
             comb_value = self.dist_weight[_i]
-            if comb_value < self.threshold:
-                comb_value2 = self.threshold
-            else:
-                comb_value2 = comb_value
-            self.weight[_i] = 1./comb_value2
-            print("Station, v1, v2, w: %10s, %10.5f %10.5f %10.5f" 
+            #if comb_value < self.threshold:
+            #    comb_value2 = self.threshold
+            #else:
+            #    comb_value2 = comb_value
+            self.weight[_i] = np.log(1./comb_value)
+            if self.weight[_i] < self.threshold:
+                self.weight[_i] = self.threshold
+            print("Station, v1, w: %10s, %10.5f %10.5f" 
                     % (self.stations[_i].tag, comb_value,
-                    comb_value2, self.weight[_i]))
+                       self.weight[_i]))
 
         self.weight = self._normalize(self.weight)
 
@@ -330,8 +356,8 @@ class VoronoiWeight(WeightBase):
         """
         sphere_loc = np.zeros([self.nstations, 3])
         for _i in range(self.station_loc.shape[0]):
-            lat = self.station_loc[_i, 0]
-            lon = self.station_loc[_i, 1]
+            lat = np.deg2rad(self.station_loc[_i, 0])
+            lon = np.deg2rad(self.station_loc[_i, 1])
             sphere_loc[_i, 0] = radius * cos(lat) * cos(lon) + center[0]
             sphere_loc[_i, 1] = radius * cos(lat) * sin(lon) + center[1]
             sphere_loc[_i, 2] = radius * sin(lat) + center[2]
@@ -341,6 +367,10 @@ class VoronoiWeight(WeightBase):
         radius = 1.0
         center = np.array([0, 0, 0])
         self.points = self._transfer_coordinate(radius, center)
+        for _i in range(self.nstations):
+            print("%10s: [%10.5f, %10.5f] -- [%10.5f, %10.5f, %10.5f]" 
+                  % (self.station_tag[_i], self.station_loc[_i][0], self.station_loc[_i][1],
+                     self.points[_i][0], self.points[_i][1], self.points[_i][2])) 
         
         self.sv = SphericalVoronoi(self.points, 1, center)
         self.sv.sort_vertices_of_regions()
@@ -360,7 +390,7 @@ class VoronoiWeight(WeightBase):
         x = np.outer(np.cos(u), np.sin(v)) 
         y = np.outer(np.sin(u), np.sin(v))
         z = np.outer(np.ones(np.size(u)), np.cos(v))
-        #ax.plot_surface(x, y, z, color='y', alpha=0.0) 
+        ax.plot_surface(x, y, z, color='y', alpha=0.0)
         # plot generator points
         ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='b')
 
@@ -381,6 +411,8 @@ class VoronoiWeight(WeightBase):
         ax.set_yticks([-1,1])
         ax.set_zticks([-1,1]);
         plt.tick_params(axis='both', which='major', labelsize=6)
+        plt.xlabel("X")
+        plt.ylabel("Y")
 
         plt.show()
 
