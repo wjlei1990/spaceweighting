@@ -14,8 +14,8 @@ def read_stations(station_file):
         info = line.split()
         sta = info[0]
         nw = info[1]
-        lat = float(info[2])
-        lon = float(info[3])
+        lat = float(info[3])
+        lon = float(info[2])
         elev = float(info[4])
         depth = float(info[5])
         stations.append(Station(network=nw, station=sta, latitude=lat,
@@ -25,8 +25,9 @@ def read_stations(station_file):
 
 
 def test_exp(stations, event):
-    weight = ExpWeight(stations, event, l0=20.0, phi0=10.0,
-                       threshold=0.01)
+    print("Exp weighting")
+    weight = ExpWeight(stations, event, l0=10.0, phi0=10.0,
+                       threshold=0.002)
     weight.calculate_weight()
 
     #azi_weight = weight.azi_weight
@@ -42,19 +43,19 @@ def test_exp(stations, event):
     return weight.weight
 
 def test_vor(stations, event):
+    print("Vor weighting")
     weight = VoronoiWeight(stations, event)
     weight.calculate_weight()
 
     weight.plot_global_map()
     weight.plot_sphere()
-
     weight.plot_weight_histogram()
     weight.write_weight(filename="vor_weight.txt")
 
     return weight.weight
 
 if __name__ == "__main__":
-    stations = read_stations("./examples/STATIONS")
+    stations = read_stations("./examples/ryan_test/STATIONS_4000")
     event = Event(latitude=0.0, longitude=0.0)
 
     expdata = test_exp(stations, event)
@@ -80,9 +81,8 @@ if __name__ == "__main__":
     plt.show()
 
     with open("ratio.txt", "w") as fh:
-        for _i in range(len(stations)):
+        for _i in range(len(expdata)):
             ratio = vordata[_i]/expdata[_i]*100.
             fh.write("%10.5f %10.5f %10.2f\n" % (expdata[_i], vordata[_i], 
                      ratio))
-
 

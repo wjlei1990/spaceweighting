@@ -22,6 +22,7 @@ from mpl_toolkits.basemap import Basemap
 from obspy.imaging.beachball import Beach
 
 import operator
+from pprint import pprint
 
 
 class Station(object):
@@ -34,6 +35,22 @@ class Station(object):
         self.longitude = longitude
         self.elevation = elevation
         self.tag = "%s_%s" % (self.network, self.station)
+
+        self._sanity_check()
+
+    def _sanity_check(self):
+        if not isinstance(self.network, str):
+            raise ValueError("Network should be a string: %s" 
+                             % str(self.network))
+        if not isinstance(self.station, str):
+            raise ValueError("Station should be a string: %s" 
+                             % str(self.station))
+        if self.latitude < -90.0 or self.latitude > 90.0:
+            raise ValueError("Latitude should be between [-90, 90]: %f" 
+                             % self.latitude)
+        if self.longitude < -180.0 or self.longitude > 180.0:
+            raise ValueError("Longitude should be between [-180, 180]: %f" 
+                             % self.longitude)
 
     def __str__(self):
         return "[network:%-3s, station:%-5s, (lat=%-7.2f, lon=%-7.2f, " \
@@ -58,38 +75,68 @@ class WeightBase(object):
     def __init__(self, stations, event):
 
         self.stations = stations
+        self._stations = stations
         self.event = event
 
-        self.nstations = len(self.stations)
         self.station_tag, self.station_loc, self.network_dict = \
-                self._sort_stations()
+                self._sort_and_check_stations()
+        self.nstations = len(self.stations)
 
         self.weight = np.zeros(self.nstations)
 
-    def _find_duplicate(self, a):
-        dim = a.shape[0]
-        b = np.ascontiguousarray(a).view(np.dtype(
-            (np.void, a.dtype.itemsize * a.shape[1])))
+    def _find_duplicate(self):
+        sta_tag = []
+        sta_loc = []
+        for station in self.stations:
+            sta_tag.append(station.tag)
+            sta_loc.append([station.latitude, station.longitude])
+        sta_loc = np.array(sta_loc)
+        # check station name
+        if len(sta_tag) != len(set(sta_tag)):
+            raise ValueError("Duplicate station names!")
+        # check station location
+        dim = sta_loc.shape[0]
+        b = np.ascontiguousarray(sta_loc).view(np.dtype(
+            (np.void, sta_loc.dtype.itemsize * sta_loc.shape[1])))
         _, idx = np.unique(b, return_index=True)
-        unique_a = a[idx]
-        for i in range(dim):
-            if i not in idx:
-                print(i, self.stations[i])
-                raise ValueError("duplicate")
+        duplicate_list = list(set([i for i in range(dim)]) - set(idx))
+        if len(idx) + len(duplicate_list) != dim:
+            raise ValueError("The sum of dim doesn't agree")
+        duplicate_list.sort()
+        return duplicate_list
 
     def _sort_stations(self):
-        sta_list = dict()
-        sta_loc = []
-        sta_tag = []
+        sta_dict = dict()
+        sta_list = list()
         for station in self.stations:
-            sta_list[station.tag] = [station.latitude, station.longitude]
-        od = collections.OrderedDict(sorted(sta_list.items()))
-        for value in od:
-            sta_tag.append(value)
-            sta_loc.append(od[value])
-            #print(value, od[value])
+            sta_dict[station.tag] = station
+        od = collections.OrderedDict(sorted(sta_dict.items()))
+        for key, value in od.items():
+            sta_list.append(value)
+        self.stations = sta_list
+
+    def _remove_duplicate_stations(self, duplicate_list):
+        if len(duplicate_list) == 0:
+            return
+        for index in sorted(duplicate_list, reverse=True):
+            del self.stations[index]
+        if len(self._find_duplicate()) != 0:
+            raise ValueError("There are still duplicates after removing.")
+
+    def _sort_and_check_stations(self):
+        self._sort_stations()
+        duplicate_list = self._find_duplicate()
+        self._remove_duplicate_stations(duplicate_list)
+        print("Number of original stations: %d" % len(self._stations))
+        print("Number of duplicate stations removed: %d" % len(duplicate_list))
+        print("Number of remaining stations: %d" % len(self.stations))
+        
+        sta_tag = []
+        sta_loc = []
+        for station in self.stations:
+            sta_tag.append(station.tag)
+            sta_loc.append([station.latitude, station.longitude])
         sta_loc = np.array(sta_loc)
-        self._find_duplicate(sta_loc)
 
         nw_dict = dict()
         for station in self.stations:
@@ -132,7 +179,7 @@ class WeightBase(object):
     def _plot_histogram(weights, title="", figname=None):
         fig = plt.figure()
 
-        plt.hist(weights, 20, alpha=0.75)
+        plt.hist(weights, bins=30, alpha=0.75)
 
         plt.xlabel("weight")
         plt.ylabel("Count")
@@ -297,13 +344,14 @@ class ExpWeight(WeightBase):
             #else:
             #    comb_value2 = comb_value
             self.weight[_i] = np.log(1./comb_value)
-            if self.weight[_i] < self.threshold:
-                self.weight[_i] = self.threshold
-            print("Station, v1, w: %10s, %10.5f %10.5f" 
-                    % (self.stations[_i].tag, comb_value,
-                       self.weight[_i]))
+            #print("Station, v1, w: %10s, %10.5f %10.5f" 
+            #        % (self.stations[_i].tag, comb_value,
+            #           self.weight[_i]))
 
         self.weight = self._normalize(self.weight)
+        for _i in range(self.nstations):
+            if self.weight[_i] < self.threshold:
+                self.weight[_i] = self.threshold
 
     def plot_weight_matrix(self, outputdir=None, figformat="png"):
         if outputdir is None:
@@ -367,10 +415,11 @@ class VoronoiWeight(WeightBase):
         radius = 1.0
         center = np.array([0, 0, 0])
         self.points = self._transfer_coordinate(radius, center)
-        for _i in range(self.nstations):
-            print("%10s: [%10.5f, %10.5f] -- [%10.5f, %10.5f, %10.5f]" 
-                  % (self.station_tag[_i], self.station_loc[_i][0], self.station_loc[_i][1],
-                     self.points[_i][0], self.points[_i][1], self.points[_i][2])) 
+        #for _i in range(self.nstations):
+        #    print("%10s: [%10.5f, %10.5f] -- [%10.5f, %10.5f, %10.5f]" 
+        #          % (self.station_tag[_i], self.station_loc[_i][0], 
+        #             self.station_loc[_i][1], self.points[_i][0], 
+        #             self.points[_i][1], self.points[_i][2])) 
         
         self.sv = SphericalVoronoi(self.points, 1, center)
         self.sv.sort_vertices_of_regions()
@@ -390,10 +439,7 @@ class VoronoiWeight(WeightBase):
         x = np.outer(np.cos(u), np.sin(v)) 
         y = np.outer(np.sin(u), np.sin(v))
         z = np.outer(np.ones(np.size(u)), np.cos(v))
-        ax.plot_surface(x, y, z, color='y', alpha=0.0)
-        # plot generator points
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='b')
-
+        ax.plot_surface(x, y, z, color='y', alpha=0.05)
         # plot Voronoi vertices
         #ax.scatter(sv.vertices[:, 0], sv.vertices[:, 1], sv.vertices[:, 2], 
         #           c='g') 
@@ -403,6 +449,9 @@ class VoronoiWeight(WeightBase):
             polygon = Poly3DCollection([sv.vertices[region]], alpha=1.0) 
             polygon.set_color(random_color) 
             ax.add_collection3d(polygon) 
+
+        # plot generator points
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='b')
 
         ax.set_xlim(-1,1)
         ax.set_ylim(-1,1)
